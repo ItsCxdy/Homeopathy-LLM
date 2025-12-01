@@ -3,6 +3,7 @@ import requests
 import json
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+import datetime
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 import logging
 # Using the langchain_community package imports as they were in the original file
@@ -24,6 +25,10 @@ DESCRIBING_SYMPTOMS = 1
 
 class TelegramHomeopathyBot:
     def __init__(self):
+        # Create logs directory if not exists
+        self.logs_dir = "UserChatLogs"
+        os.makedirs(self.logs_dir, exist_ok=True)
+        
         # Initialize embeddings and vector store
         self.embeddings = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2"
@@ -37,6 +42,18 @@ class TelegramHomeopathyBot:
         # Store user sessions: includes chat_history
         self.user_sessions = {}
     
+    def log_chat(self, user_id: int, username: str, message: str, is_bot: bool = False):
+        """Log user/bot messages to individual files"""
+        try:
+            log_file = os.path.join(self.logs_dir, f"user_{user_id}.log")
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            direction = "BOT" if is_bot else "USER"
+            
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] {direction} ({username}): {message}\n")
+        except Exception as e:
+            logger.error(f"Failed to log chat: {e}")
+
     def get_user_session(self, user_id):
         """Get or create user session, initializing history."""
         if user_id not in self.user_sessions:
@@ -159,6 +176,13 @@ Type your symptoms below to begin...
     homeopathy_bot.user_sessions[user_id] = {'chat_history': [], 'consultation_count': 0}
     
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
+    # Log start command
+    homeopathy_bot.log_chat(
+        user.id,
+        user.username or f"{user.first_name} {user.last_name or ''}".strip(),
+        "/start command received",
+        is_bot=False
+    )
     return DESCRIBING_SYMPTOMS
 
 async def handle_symptoms(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -186,6 +210,21 @@ async def handle_symptoms(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Update chat history
         session['chat_history'].append({"role": "user", "content": user_input})
         session['chat_history'].append({"role": "assistant", "content": response})
+        
+        # Log user input and bot response
+        user = update.effective_user
+        self.log_chat(
+            user.id,
+            user.username or f"{user.first_name} {user.last_name or ''}".strip(),
+            user_input,
+            is_bot=False
+        )
+        self.log_chat(
+            user.id,
+            user.username or f"{user.first_name} {user.last_name or ''}".strip(),
+            response,
+            is_bot=True
+        )
         
         # Keep only last 6 messages (3 user + 3 assistant) to prevent context overflow
         if len(session['chat_history']) > 6:
