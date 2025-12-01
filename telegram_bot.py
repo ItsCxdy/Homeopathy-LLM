@@ -6,8 +6,8 @@ from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 import logging
 # Using the langchain_community package imports as they were in the original file
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
 
 # Load environment variables
 load_dotenv()
@@ -42,7 +42,8 @@ class TelegramHomeopathyBot:
         if user_id not in self.user_sessions:
             self.user_sessions[user_id] = {
                 'chat_history': [],
-                'consultation_count': 0
+                'consultation_count': 0,
+                'last_query': None  # Track query context
             }
         return self.user_sessions[user_id]
     
@@ -81,11 +82,13 @@ class TelegramHomeopathyBot:
         # System prompt reflecting the strict constraints from doctor_bot.py
         system_prompt = """You are an expert Homeopathy Doctor. Your goal is to find the best possible remedy from the provided Context.
 
-**DIAGNOSTIC PROCESS & CONSTRAINTS (STRICTLY FOLLOW THESE):**
-1. **Diagnosis Limit:** You MUST provide a final diagnosis and remedy suggestion by the **third turn** of the conversation (Turn 3).
-2. **Clarification:** You are permitted to ask a MAXIMUM of 3 concise clarifying questions, and these questions MUST ONLY BE ASKED IN THE VERY FIRST TURN. **In all subsequent turns (Turn 2 and beyond), you MUST NOT ask any questions.** You must immediately proceed to diagnosis based on the accumulated history.
-3. **Focus:** Analyze the patient's full symptom set, including the **Chat History**. Do not introduce symptoms or remedies found *only* in the Context if the patient has not mentioned them.
-4. **Prescription Rule:** When prescribing, be concise. State the single best-matching remedy and explain briefly why it fits the patient's most prominent symptoms. If the conversation reaches the third turn, you MUST prescribe the best available remedy or the top two possibilities if ambiguous.
+**DIAGNOSTIC PROCESS & CONSTRAINTS:**
+1. **Focus:** Analyze the patient's full symptom set, including the **Chat History**. Only analyze the symptoms explicitly mentioned by the patient. IGNORE any symptoms found *only* in the Context that the patient has not mentioned.
+2. **Clarification:** You MUST conclude the diagnosis and suggest a remedy within the first **two or three turns** of the conversation. Ask a MAXIMUM of 3 concise clarifying questions in the first turn only, if needed. In subsequent turns, prioritize diagnosing based on the accumulated history.
+3. **Prescription Rule:** **MUST** prescribe the single best-matching remedy when:
+   a) You have clear matching symptoms from the Context.
+   b) The patient explicitly asks for the medicine, or indicates they cannot answer more questions. In this case, use the best available information from the Chat History to prescribe.
+4. **Safety:** If unsure or the context doesn't contain a relevant remedy, admit it honestly.
 5. **Tone:** Always be professional, caring, and responsible.
 """
         # Build the message payload including the system instruction and the history
@@ -189,7 +192,10 @@ async def handle_symptoms(update: Update, context: ContextTypes.DEFAULT_TYPE):
             session['chat_history'] = session['chat_history'][-6:]
         
         # Send response using Markdown for clear formatting
-        await processing_msg.delete()  # Remove processing message
+        try:
+            await processing_msg.delete()  # Remove processing message
+        except Exception as e:
+            logger.warning(f"Could not delete processing message: {e}")
         await update.message.reply_text(
             f"🩺 *Homeopathy Doctor:*\n\n{response}",
             parse_mode='Markdown' # Use Markdown for formatting
@@ -211,13 +217,19 @@ async def handle_quick_actions(update: Update, context: ContextTypes.DEFAULT_TYP
     """Handle quick action buttons."""
     user_input = update.message.text
     
-    if user_input == "🔍 Describe more symptoms or answer questions":
+    if user_input in ["🔍 Describe more symptoms or answer questions", "Reset please"]:
         await update.message.reply_text("Please provide any additional details or clarify the Doctor's previous questions...")
-    elif user_input == "🔄 Start a new consultation":
+    elif user_input in ["🔄 Start a new consultation", "Reset please"]:
         user_id = update.effective_user.id
         if user_id in homeopathy_bot.user_sessions:
-            # Clear history for a clean start
-            homeopathy_bot.user_sessions[user_id]['chat_history'] = []
+            # Clear history and reset embeddings for a completely fresh start
+            homeopathy_bot.user_sessions[user_id] = {
+                'chat_history': [],
+                'consultation_count': 0,
+                'last_query': None  # Reset any cached query context
+            }
+            # Reinitialize the retriever to clear any cached context
+            homeopathy_bot.retriever = homeopathy_bot.vector_store.as_retriever(search_kwargs={"k": 4})
         await update.message.reply_text("🔄 Starting new consultation. Please describe your symptoms...")
     
     return DESCRIBING_SYMPTOMS
@@ -271,25 +283,32 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Sorry, I encountered an unexpected error. Please try again or use /start to begin a new consultation."
         )
 
-def main():
-    """Start the bot."""
-    # Get Telegram bot token from environment variable
-    TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not TELEGRAM_TOKEN:
+def check_dependencies():
+    """Checks for required environment variables and the vector database."""
+    if not os.getenv("TELEGRAM_BOT_TOKEN"):
         print("❌ TELEGRAM_BOT_TOKEN not found in .env file. Please set it to run the bot.")
-        return
+        return False
     
-    # Check if vector database exists
     if not os.path.exists("./vector_db"):
         print("❌ Vector database not found. Please run 'python ingest_book.py' first.")
-        return
+        return False
     
-    # Check OpenRouter API key
     if not os.getenv("OPENROUTER_API_KEY"):
         print("❌ OPENROUTER_API_KEY not found in .env file. Please set it to run the bot.")
+        return False
+    
+    return True
+
+def main():
+    """Start the bot."""
+    
+    if not check_dependencies():
         return
     
     print("🚀 Starting Telegram Homeopathy Bot...")
+    
+    # Get Telegram bot token from environment variable
+    TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     
     # Create Application
     application = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -299,8 +318,8 @@ def main():
         entry_points=[CommandHandler('start', start)],
         states={
             DESCRIBING_SYMPTOMS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_symptoms),
                 MessageHandler(filters.Regex(r'^(🔍|🔄)'), handle_quick_actions),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_symptoms),
             ],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
