@@ -2,15 +2,14 @@ import os
 import requests
 import json
 from dotenv import load_dotenv
+import logging
 
-# FIX 1: Reverting the import back to the community package, 
-# as requested, to avoid the 'langchain_huggingface' ModuleNotFoundError.
-# NOTE: This will bring back a deprecation warning, but the code will run, 
-# provided 'sentence-transformers' is installed.
+# Set up basic logging
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
+
+# Reverting to community package imports as in the original code
 from langchain_community.embeddings import HuggingFaceEmbeddings
-
-# Note: Keeping Chroma from community for minimal change, but be aware of its deprecation warning.
-# If you want to eliminate the Chroma warning, you would install 'langchain-chroma' and change this import:
 from langchain_community.vectorstores import Chroma
 
 # Load environment variables
@@ -28,7 +27,7 @@ class HomeopathyDoctorBot:
         )
         self.retriever = self.vector_store.as_retriever(search_kwargs={"k": 4})
         
-        # --- FIX 2: Initialize chat history for state management ---
+        # Initialize chat history for state management
         self.chat_history = []
         
     def get_relevant_context(self, query):
@@ -39,15 +38,19 @@ class HomeopathyDoctorBot:
         return context
         
     def query_ai(self, user_message, context, history):
-        """Query the AI model via OpenRouter"""
-        api_key = os.getenv("OPENROUTER_API_KEY")
+        """Query the AI model via Chute.ai"""
+        api_key = os.getenv("CHUTEAI_API_KEY")
         
+        if not api_key:
+            logger.error("CHUTEAI_API_KEY is missing or empty in the environment.")
+            return "Error: Configuration missing CHUTEAI_API_KEY."
+            
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
         
-        # --- FIX 3: ENHANCED SYSTEM PROMPT for history and strict questioning ---
+        # System prompt remains the same
         system_prompt = """You are an expert Homeopathy Doctor. Your goal is to find the best possible remedy from the provided Context.
 
 **DIAGNOSTIC PROCESS & CONSTRAINTS:**
@@ -59,23 +62,28 @@ class HomeopathyDoctorBot:
 4. **Safety:** If unsure or the context doesn't contain a relevant remedy, admit it honestly.
 5. **Tone:** Always be professional, caring, and responsible.
 """
-        # Build the message payload including the system instruction and the history
         messages = [
             {"role": "system", "content": system_prompt},
-            *history, # Insert existing conversation history
+            *history,
             {"role": "user", "content": f"Context from homeopathy book:\n{context}\n\nPatient Complaint: {user_message}"}
         ]
         
         data = {
-            "model": "meta-llama/llama-3-8b-instruct", 
+            # FIX: Replaced the likely incorrect model name ("Gemma 3 4b It") 
+            # with a known working model from the user's Chute.ai example, 
+            # as the 404 error is usually caused by an invalid model identifier.
+            "model": "meituan-longcat/LongCat-Flash-Chat-FP8", 
             "messages": messages,
-            "temperature": 0.2, 
+            "temperature": 0.2,
             "max_tokens": 500
         }
         
+        # --- FIX: Corrected hostname from llm.chute.ai to llm.chutes.ai ---
+        api_url = "https://llm.chutes.ai/v1/chat/completions"
+
         try:
             response = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
+                api_url,
                 headers=headers,
                 json=data,
                 timeout=30
@@ -84,16 +92,16 @@ class HomeopathyDoctorBot:
             if response.status_code == 200:
                 return response.json()["choices"][0]["message"]["content"]
             else:
-                # Provide more helpful API error details
                 error_data = response.json()
                 error_message = error_data.get("error", {}).get("message", "No detailed error message.")
-                return f"Error: Unable to get response (Status: {response.status_code}. OpenRouter Message: {error_message})"
+                logger.error(f"Chute.ai API Error Status: {response.status_code}. Message: {error_message}")
+                return f"Error: Unable to get response (Status: {response.status_code}). Chute.ai Message: {error_message}"
                 
-        except Exception as e:
-            return f"Error: {str(e)}"
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Connection/Request Error: {e}")
+            return f"Error: Failed to connect to Chute.ai. Check your connection or API endpoint. Details: {str(e)}"
         
     def start_consultation(self):
-        # self.chat_history is now initialized in __init__
         
         print("🤖 Homeopathy AI Doctor is ready!")
         print("=" * 50)
@@ -124,10 +132,11 @@ class HomeopathyDoctorBot:
                 print(f"Homeopathy Doctor: {response}\n")
                 print("-" * 50)
 
-                # --- FIX 4: Update chat history with patient input and bot response ---
-                # The LLM needs the history to be in the 'role' format
+                # --- Update chat history with patient input and bot response ---
                 self.chat_history.append({"role": "user", "content": user_input})
-                self.chat_history.append({"role": "assistant", "content": response})
+                # Check if the response contains an error message before appending as assistant's content
+                if not response.startswith("Error:"):
+                    self.chat_history.append({"role": "assistant", "content": response})
                 
             except KeyboardInterrupt:
                 print("\n\nHomeopathy Doctor: Consultation ended. Take care!")
@@ -145,8 +154,8 @@ def main():
         return
     
     # Check API key
-    if not os.getenv("OPENROUTER_API_KEY"):
-        print("❌ OPENROUTER_API_KEY not found in .env file.")
+    if not os.getenv("CHUTEAI_API_KEY"):
+        print("❌ CHUTEAI_API_KEY not found in .env file.")
         return
     
     try:

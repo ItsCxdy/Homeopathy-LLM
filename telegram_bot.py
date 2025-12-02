@@ -6,9 +6,10 @@ from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 import datetime
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 import logging
-# Using the langchain_community package imports as they were in the original file
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
+
+# FIX 1: Using the langchain_community package imports for stability
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
 
 # Load environment variables
 load_dotenv()
@@ -42,6 +43,7 @@ class TelegramHomeopathyBot:
         # Store user sessions: includes chat_history
         self.user_sessions = {}
     
+    # FIX 4: Removed duplicate log_chat definition
     def log_chat(self, user_id: int, username: str, message: str, is_bot: bool = False):
         """Log user/bot messages to individual files"""
         try:
@@ -81,50 +83,50 @@ class TelegramHomeopathyBot:
         return context
         
     def query_ai(self, user_message, context, history):
-        """Query the AI model via OpenRouter"""
-        api_key = os.getenv("OPENROUTER_API_KEY")
+        """Query the AI model via Chute.ai"""
+        api_key = os.getenv("CHUTEAI_API_KEY")
         
-        # FIX: Add immediate check for API key presence inside the query function
         if not api_key:
-            logger.error("🚨 CRITICAL API ERROR: OPENROUTER_API_KEY is missing or empty during function call.")
-            return "❌ Configuration Error: The AI service API key (OPENROUTER_API_KEY) is missing. Please check your setup."
+            logger.error("🚨 CRITICAL API ERROR: CHUTEAI_API_KEY is missing or empty during function call.")
+            return "❌ Configuration Error: The AI service API key (CHUTEAI_API_KEY) is missing. Please check your setup."
 
         headers = {
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com", # For OpenRouter logging
-            "X-Title": "Homeopathy Telegram Bot" # For OpenRouter logging
+            "Content-Type": "application/json"
         }
         
-        # System prompt reflecting the strict constraints from doctor_bot.py
+        # System prompt remains the same
         system_prompt = """You are an expert Homeopathy Doctor. Your goal is to find the best possible remedy from the provided Context.
 
 **DIAGNOSTIC PROCESS & CONSTRAINTS:**
 1. **Focus:** Analyze the patient's full symptom set, including the **Chat History**. Only analyze the symptoms explicitly mentioned by the patient. IGNORE any symptoms found *only* in the Context that the patient has not mentioned.
 2. **Clarification:** You MUST conclude the diagnosis and suggest a remedy within the first **two or three turns** of the conversation. Ask a MAXIMUM of 3 concise clarifying questions in the first turn only, if needed. In subsequent turns, prioritize diagnosing based on the accumulated history.
 3. **Prescription Rule:** **MUST** prescribe the single best-matching remedy when:
-   a) You have clear matching symptoms from the Context.
-   b) The patient explicitly asks for the medicine, or indicates they cannot answer more questions. In this case, use the best available information from the Chat History to prescribe.
+    a) You have clear matching symptoms from the Context.
+    b) The patient explicitly asks for the medicine, or indicates they cannot answer more questions. In this case, use the best available information from the Chat History to prescribe.
 4. **Safety:** If unsure or the context doesn't contain a relevant remedy, admit it honestly.
 5. **Tone:** Always be professional, caring, and responsible.
 """
-        # Build the message payload including the system instruction and the history
         messages = [
             {"role": "system", "content": system_prompt},
-            *history, # Insert existing conversation history
+            *history,
             {"role": "user", "content": f"Context from homeopathy book:\n{context}\n\nPatient Complaint: {user_message}"}
         ]
         
         data = {
-            "model": "meta-llama/llama-3-8b-instruct", 
+            # FIX 3: Changed to the working model that resolved the 404 error in the console bot
+            "model": "meituan-longcat/LongCat-Flash-Chat-FP8", 
             "messages": messages,
-            "temperature": 0.2, 
+            "temperature": 0.2,
             "max_tokens": 500
         }
         
+        # FIX 2: Corrected API URL to the one that successfully connected
+        api_url = "https://llm.chutes.ai/v1/chat/completions"
+
         try:
             response = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
+                api_url,
                 headers=headers,
                 json=data,
                 timeout=30
@@ -136,12 +138,10 @@ class TelegramHomeopathyBot:
                 error_data = response.json()
                 error_message = error_data.get("error", {}).get("message", "No detailed error message.")
                 
-                # --- FIX: Added specific 401 check for better console logging ---
                 if response.status_code == 401:
-                    logger.error("🚨 CRITICAL API ERROR (401 Unauthorized) 🚨: The OPENROUTER_API_KEY is likely invalid or missing. Please check your .env file.")
-                # ------------------------------------------------------------------
+                    logger.error("🚨 CRITICAL API ERROR (401 Unauthorized) 🚨: The CHUTEAI_API_KEY is likely invalid or missing. Please check your .env file.")
                 
-                logger.error(f"OpenRouter Error {response.status_code}: {error_message}")
+                logger.error(f"Chute.ai Error {response.status_code}: {error_message}")
                 return f"❌ I'm having technical difficulties. Please try again later. (Error: {response.status_code})"
                 
         except Exception as e:
@@ -208,18 +208,19 @@ async def handle_symptoms(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = homeopathy_bot.query_ai(user_input, context_text, session['chat_history'])
         
         # Update chat history
-        session['chat_history'].append({"role": "user", "content": user_input})
-        session['chat_history'].append({"role": "assistant", "content": response})
+        if not response.startswith("❌"): # Only update history if not an error message
+            session['chat_history'].append({"role": "user", "content": user_input})
+            session['chat_history'].append({"role": "assistant", "content": response})
         
         # Log user input and bot response
         user = update.effective_user
-        self.log_chat(
+        homeopathy_bot.log_chat(
             user.id,
             user.username or f"{user.first_name} {user.last_name or ''}".strip(),
             user_input,
             is_bot=False
         )
-        self.log_chat(
+        homeopathy_bot.log_chat(
             user.id,
             user.username or f"{user.first_name} {user.last_name or ''}".strip(),
             response,
@@ -247,7 +248,10 @@ async def handle_symptoms(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Error processing message: {e}")
-        await processing_msg.delete()
+        try:
+            await processing_msg.delete()
+        except:
+            pass
         await update.message.reply_text("❌ Sorry, I encountered an error. Please try again.")
     
     return DESCRIBING_SYMPTOMS
@@ -257,7 +261,13 @@ async def handle_quick_actions(update: Update, context: ContextTypes.DEFAULT_TYP
     user_input = update.message.text
     
     if user_input in ["🔍 Describe more symptoms or answer questions", "Reset please"]:
-        await update.message.reply_text("Please provide any additional details or clarify the Doctor's previous questions...")
+        # If the bot has prescribed a remedy, the user might be ready to start fresh, 
+        # so this is a good opportunity to offer the reset.
+        if len(homeopathy_bot.get_user_session(update.effective_user.id)['chat_history']) >= 4: # If 2 turns have passed
+             await update.message.reply_text("Please provide any additional details or clarify the Doctor's previous questions...")
+        else:
+             await update.message.reply_text("Please provide any additional details or clarify the Doctor's previous questions...")
+             
     elif user_input in ["🔄 Start a new consultation", "Reset please"]:
         user_id = update.effective_user.id
         if user_id in homeopathy_bot.user_sessions:
@@ -269,7 +279,7 @@ async def handle_quick_actions(update: Update, context: ContextTypes.DEFAULT_TYP
             }
             # Reinitialize the retriever to clear any cached context
             homeopathy_bot.retriever = homeopathy_bot.vector_store.as_retriever(search_kwargs={"k": 4})
-        await update.message.reply_text("🔄 Starting new consultation. Please describe your symptoms...")
+        await update.message.reply_text("🔄 Starting new consultation. Please describe your symptoms...", reply_markup=ReplyKeyboardRemove())
     
     return DESCRIBING_SYMPTOMS
 
@@ -332,8 +342,9 @@ def check_dependencies():
         print("❌ Vector database not found. Please run 'python ingest_book.py' first.")
         return False
     
-    if not os.getenv("OPENROUTER_API_KEY"):
-        print("❌ OPENROUTER_API_KEY not found in .env file. Please set it to run the bot.")
+    # FIX 5: Changed dependency check to look for CHUTEAI_API_KEY
+    if not os.getenv("CHUTEAI_API_KEY"):
+        print("❌ CHUTEAI_API_KEY not found in .env file. Please set it to run the bot.")
         return False
     
     return True
@@ -369,7 +380,7 @@ def main():
     application.add_handler(CommandHandler('help', help_command))
     application.add_handler(CommandHandler('cancel', cancel))
     
-    # FIX: This handler catches any plain text not handled by the ConversationHandler or other commands.
+    # Handler for general text outside the conversation flow
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generic_message))
     
     # Add error handler

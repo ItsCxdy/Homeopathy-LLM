@@ -1,0 +1,16 @@
+# Environment files
+.env
+
+# Log files
+log.txt
+
+
+# Database directories
+vector_db/
+old/oldvector_db/
+
+# Old code versions
+old/
+
+# User chat logs
+UserChatLogs/
