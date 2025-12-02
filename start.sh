@@ -1,13 +1,10 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
-This script is the entry point for the Render Web Service.
+# Ensure requirements are installed
+pip install -r requirements.txt
 
-echo "Starting Homeopathy Telegram Bot..."
-
-Ensure the log directory exists (optional, but good practice)
-
+# Ensure the log directory exists (optional, but good practice)
 mkdir -p UserChatLogs
 
-Run your main bot file
-
+# Run the doctor bot
 python telegram_bot.py
