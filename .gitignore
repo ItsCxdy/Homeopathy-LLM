@@ -6,7 +6,6 @@ log.txt
 
 
 # Database directories
-vector_db/
 old/oldvector_db/
 
 # Old code versions

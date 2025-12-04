@@ -1,6 +1,12 @@
 python-dotenv
 requests
 python-telegram-bot
+httpx
+langchain
 langchain-community
-langchain-chroma
+langchain-huggingface
+chromadb
 sentence-transformers
+huggingface-hub
+typing-extensions
+pydantic

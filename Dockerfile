@@ -1,4 +1,5 @@
 # Use an official Python runtime as a parent image
+# Read the doc: https://huggingface.co/docs/hub/spaces-sdks-docker# you will also find guides on how best to write your Dockerfile
 FROM python:3.10-slim
 
 # Set the working directory in the container
